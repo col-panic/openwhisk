@@ -92,18 +92,18 @@ subprojects {
 
         if (project.plugins.hasPlugin('maven-publish')) {
             task sourcesJar(type: Jar, dependsOn: classes) {
-                classifier = 'sources'
+                archiveClassifier.set('sources')
                 from sourceSets.main.allSource
             }
 
             task testSourcesJar(type: Jar, dependsOn: testClasses) {
-                classifier = 'test-sources'
+                archiveClassifier.set('test-sources')
                 from sourceSets.test.allSource
                 exclude("logback-test.xml")
             }
 
             task testClassesJar(type: Jar, dependsOn: testClasses) {
-                classifier = 'tests'
+                archiveClassifier.set('tests')
                 from sourceSets.test.output
             }
         }

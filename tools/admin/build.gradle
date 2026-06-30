@@ -16,7 +16,7 @@
  */
 
 plugins {
-    id 'org.springframework.boot' version '2.0.2.RELEASE'
+    id 'org.springframework.boot' version '2.7.18'
     id 'scala'
     id 'maven-publish'
     id 'org.scoverage'
@@ -40,8 +40,8 @@ task copyBootJarToBin(type:Copy){
 }
 
 bootJar {
-    classifier = 'cli'
-    mainClassName = 'org.apache.openwhisk.core.cli.Main'
+    archiveClassifier.set('cli')
+    mainClass = 'org.apache.openwhisk.core.cli.Main'
     launchScript()
     finalizedBy copyBootJarToBin
 }

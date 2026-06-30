@@ -269,7 +269,7 @@ dependencies {
     swaggerCodegen 'io.swagger:swagger-codegen-cli:2.4.29'
 }
 
-def keystorePath = new File(sourceSets.test.scala.outputDir, 'keystore')
+def keystorePath = new File(sourceSets.test.scala.destinationDirectory.get().asFile, 'keystore')
 task deleteKeystore(type: Delete) {
     delete keystorePath
 }
