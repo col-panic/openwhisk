@@ -26,7 +26,7 @@ buildscript {
 }
 
 plugins {
-    id "org.scoverage" version "7.0.0" apply false
+    id "org.scoverage" version "8.1" apply false
     id "cz.alenkacz.gradle.scalafmt" version "1.16.2" apply false
 }
 

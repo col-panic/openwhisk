@@ -16,9 +16,9 @@
 #
 # if you change version of openjdk, also update tools/github/setup.sh to download the corresponding jdk
 # NOTE:
-# OpenWhisk will use a 21-jre multi arch image, compilation will be done with a jdk 17 temurin based image.
-# as wsk CLI is compiled against glibc we need touse a GLIBC based JRE Image (alpine it is not GLIBC based)
-FROM eclipse-temurin:21-jre
+# OpenWhisk will use a 25-jre multi arch image, compilation will be done with a jdk 25 temurin based image.
+# as wsk CLI is compiled against glibc we need to use a GLIBC based JRE Image (alpine it is not GLIBC based)
+FROM eclipse-temurin:25-jre
 
 ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en
