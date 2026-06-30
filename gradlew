@@ -142,6 +142,43 @@ location of your Java installation."
     fi
 fi
 
+# Gradle 8.x build scripts in this repository can fail under Java 25+ with
+# "Unsupported class file major version 69" during Groovy semantic analysis.
+# Prefer a locally available Java 21/17 launcher when Java 25+ is detected.
+JAVA_VERSION=$("$JAVACMD" -version 2>&1 | sed -n '1s/.*version "\(.*\)".*/\1/p')
+JAVA_MAJOR=$(printf '%s\n' "$JAVA_VERSION" | sed -E 's/^1\.([0-9]+).*/\1/; s/^([0-9]+).*/\1/')
+if [ "$JAVA_MAJOR" -ge 25 ] 2>/dev/null; then
+    FALLBACK_JAVA_HOME=
+    for CANDIDATE in \
+        "$JAVA21_HOME" \
+        "$JAVA17_HOME" \
+        "$JAVA_HOME_21_X64" \
+        "$JAVA_HOME_17_X64" \
+        /usr/lib/jvm/temurin-21-jdk-amd64 \
+        /usr/lib/jvm/temurin-17-jdk-amd64 \
+        /usr/local/opt/openjdk@21 \
+        /usr/local/opt/openjdk@17 \
+        /opt/homebrew/opt/openjdk@21 \
+        /opt/homebrew/opt/openjdk@17
+    do
+        if [ -n "$CANDIDATE" ] && [ -x "$CANDIDATE/bin/java" ]; then
+            FALLBACK_JAVA_HOME=$CANDIDATE
+            break
+        fi
+    done
+
+    if [ -z "$FALLBACK_JAVA_HOME" ] && "$darwin" && [ -x /usr/libexec/java_home ]; then
+        FALLBACK_JAVA_HOME=$(/usr/libexec/java_home -v 21 2>/dev/null || /usr/libexec/java_home -v 17 2>/dev/null || true)
+    fi
+
+    if [ -n "$FALLBACK_JAVA_HOME" ]; then
+        JAVA_HOME=$FALLBACK_JAVA_HOME
+        JAVACMD=$JAVA_HOME/bin/java
+        export JAVA_HOME
+        warn "Detected Java $JAVA_MAJOR launcher; using Java at $JAVA_HOME for Gradle compatibility."
+    fi
+fi
+
 # Increase the maximum file descriptors if we can.
 if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
     case $MAX_FD in #(
