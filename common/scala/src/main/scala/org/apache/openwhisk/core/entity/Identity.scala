@@ -232,12 +232,39 @@ object Identity extends MultipleReadersSingleWriterCache[Option[Identity], DocIn
           else UserLimits.standardUserLimits
         val subject = Subject(id)
         val JsString(uuid) = value("uuid")
-        val JsString(secret) = value("key")
         val JsString(namespace) = value("namespace")
+        
+        // Determine auth key type based on the key field
+        val authkey = value.getFields("key") match {
+          case Seq(JsString(keyStr)) if keyStr.contains(":") =>
+            // BasicAuthenticationAuthKey format: uuid:secret
+            val parts = keyStr.split(':')
+            BasicAuthenticationAuthKey(UUID(parts(0)), Secret(parts(1)))
+          case Seq(JsString(_)) =>
+            // OpenIdAuthKey or other format - use UUID only
+            OpenIdAuthKey(UUID(uuid))
+          case Seq(keyJson: JsObject) if keyJson.fields.contains("api_key") =>
+            // BasicAuthenticationAuthKey in JSON format
+            val JsString(apiKey) = keyJson.fields("api_key")
+            val parts = apiKey.split(':')
+            if (parts.length >= 2) {
+              BasicAuthenticationAuthKey(UUID(parts(0)), Secret(parts(1)))
+            } else {
+              BasicAuthenticationAuthKey(UUID(uuid), Secret())
+            }
+          case Seq(keyJson: JsObject) if keyJson.fields.contains("openid") =>
+            // OpenIdAuthKey in JSON format
+            val JsString(openid) = keyJson.fields("openid")
+            OpenIdAuthKey(UUID(openid))
+          case _ =>
+            // Default to BasicAuthenticationAuthKey for backward compatibility
+            BasicAuthenticationAuthKey(UUID(uuid), Secret())
+        }
+        
         Identity(
           subject,
           Namespace(EntityName(namespace), UUID(uuid)),
-          BasicAuthenticationAuthKey(UUID(uuid), Secret(secret)),
+          authkey,
           Privilege.ALL,
           limits)
       case _ =>
