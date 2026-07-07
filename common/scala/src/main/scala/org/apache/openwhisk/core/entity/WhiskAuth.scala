@@ -17,6 +17,7 @@
 
 package org.apache.openwhisk.core.entity
 
+import org.apache.openwhisk.core.database.{CacheChangeNotification, DocumentFactory, WriteTime}
 import spray.json._
 import scala.util.Try
 
@@ -54,8 +55,14 @@ protected[core] case class WhiskAuth(subject: Subject, namespaces: Set[WhiskName
   def toJson = JsObject("subject" -> subject.toJson, "namespaces" -> namespaces.toJson)
 }
 
-protected[core] object WhiskAuth extends DefaultJsonProtocol {
+protected[core] object WhiskAuth extends DocumentFactory[WhiskAuth] with DefaultJsonProtocol {
   // Need to explicitly set field names since WhiskAuth extends WhiskDocument
   // which defines more than the 2 "standard" fields
   implicit val serdes = jsonFormat(WhiskAuth.apply, "subject", "namespaces")
+
+  override val cacheEnabled = false
+  override val evictionPolicy = WriteTime
+  override val fixedCacheSize = 0
+
+  implicit val notifier: Option[CacheChangeNotification] = None
 }
