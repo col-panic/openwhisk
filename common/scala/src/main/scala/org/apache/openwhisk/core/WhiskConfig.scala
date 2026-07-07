@@ -332,4 +332,6 @@ object ConfigKeys {
 
   val invokerResourceTags = "whisk.invoker.resource.tags"
   val invokerDedicatedNamespaces = "whisk.invoker.dedicated.namespaces"
+
+  val oidc = "whisk.oidc"
 }
