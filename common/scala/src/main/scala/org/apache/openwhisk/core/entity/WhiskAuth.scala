@@ -25,18 +25,43 @@ import scala.util.Try
  * database. Each namespace has its own key which is used to determine
  * the {@ Identity} of the user calling.
  */
-protected[core] case class WhiskNamespace(namespace: Namespace, authkey: BasicAuthenticationAuthKey)
+protected[core] case class WhiskNamespace(namespace: Namespace, authkey: GenericAuthKey)
 
 protected[core] object WhiskNamespace extends DefaultJsonProtocol {
   implicit val serdes = new RootJsonFormat[WhiskNamespace] {
     def write(w: WhiskNamespace) =
-      JsObject("name" -> w.namespace.name.toJson, "uuid" -> w.namespace.uuid.toJson, "key" -> w.authkey.key.toJson)
+      JsObject("name" -> w.namespace.name.toJson, "uuid" -> w.namespace.uuid.toJson, "key" -> w.authkey.toEnvironment)
 
     def read(value: JsValue) =
       Try {
         value.asJsObject.getFields("name", "uuid", "key") match {
-          case Seq(JsString(n), JsString(u), JsString(k)) =>
-            WhiskNamespace(Namespace(EntityName(n), UUID(u)), BasicAuthenticationAuthKey(UUID(u), Secret(k)))
+          case Seq(JsString(n), JsString(u), keyJson: JsObject) =>
+            // Determine the auth key type from the JSON structure
+            if (keyJson.fields.contains("api_key")) {
+              // BasicAuthenticationAuthKey
+              val JsString(apiKey) = keyJson.fields("api_key")
+              val parts = apiKey.split(':')
+              if (parts.length >= 2) {
+                WhiskNamespace(Namespace(EntityName(n), UUID(u)), BasicAuthenticationAuthKey(UUID(parts(0)), Secret(parts(1))))
+              } else {
+                WhiskNamespace(Namespace(EntityName(n), UUID(u)), BasicAuthenticationAuthKey(UUID(u), Secret()))
+              }
+            } else if (keyJson.fields.contains("openid")) {
+              // OpenIdAuthKey
+              val JsString(openid) = keyJson.fields("openid")
+              WhiskNamespace(Namespace(EntityName(n), UUID(u)), OpenIdAuthKey(UUID(openid)))
+            } else {
+              // Default to BasicAuthenticationAuthKey for backward compatibility
+              WhiskNamespace(Namespace(EntityName(n), UUID(u)), BasicAuthenticationAuthKey(UUID(u), Secret()))
+            }
+          case Seq(JsString(n), JsString(u), JsString(keyStr)) =>
+            // Backward compatibility: key is a string in format "uuid:secret"
+            val parts = keyStr.split(':')
+            if (parts.length >= 2) {
+              WhiskNamespace(Namespace(EntityName(n), UUID(u)), BasicAuthenticationAuthKey(UUID(parts(0)), Secret(parts(1))))
+            } else {
+              WhiskNamespace(Namespace(EntityName(n), UUID(u)), BasicAuthenticationAuthKey(UUID(u), Secret()))
+            }
         }
       } getOrElse deserializationError("namespace record malformed")
   }
