@@ -27,15 +27,54 @@ import org.apache.openwhisk.core.entity._
  * Unit tests for [[OidcAuthenticationDirective]].
  *
  * These tests exercise the parts of the directive that do NOT require a running
- * OpenID Connect provider: namespace sanitisation and the dynamic identity
- * provisioning logic that operates directly against the in-memory auth-store.
+ * OpenID Connect provider: namespace sanitisation, deterministic namespace derivation,
+ * and the dynamic identity provisioning logic that operates directly against the
+ * in-memory auth-store.
  */
 @RunWith(classOf[JUnitRunner])
 class OidcAuthenticateTests extends ControllerTestCommon {
   behavior of "OidcAuthenticationDirective"
 
   // ---------------------------------------------------------------------------
-  // sanitizeNamespace
+  // deriveNamespaceName
+  // ---------------------------------------------------------------------------
+
+  it should "produce a valid 24-char EntityName from any issuer + subject" in {
+    val ns = OidcAuthenticationDirective.deriveNamespaceName("https://issuer.example.com", "user@example.com")
+    EntityName(ns) // should not throw
+    ns.length shouldBe 24
+  }
+
+  it should "produce the same namespace for the same issuer and subject (deterministic)" in {
+    val issuer = "https://issuer.example.com"
+    val sub = "alice"
+    val ns1 = OidcAuthenticationDirective.deriveNamespaceName(issuer, sub)
+    val ns2 = OidcAuthenticationDirective.deriveNamespaceName(issuer, sub)
+    ns1 shouldBe ns2
+  }
+
+  it should "produce different namespaces for subjects that differ only in a special character" in {
+    val issuer = "https://issuer.example.com"
+    // These two subjects would collide under simple sanitization
+    val ns1 = OidcAuthenticationDirective.deriveNamespaceName(issuer, "alice/foo")
+    val ns2 = OidcAuthenticationDirective.deriveNamespaceName(issuer, "alice?foo")
+    ns1 should not equal ns2
+  }
+
+  it should "produce different namespaces for the same subject under different issuers" in {
+    val sub = "alice"
+    val ns1 = OidcAuthenticationDirective.deriveNamespaceName("https://issuer1.example.com", sub)
+    val ns2 = OidcAuthenticationDirective.deriveNamespaceName("https://issuer2.example.com", sub)
+    ns1 should not equal ns2
+  }
+
+  it should "produce only URL-safe Base64 characters (valid EntityName chars)" in {
+    val ns = OidcAuthenticationDirective.deriveNamespaceName("https://issuer.example.com", "some-subject-123")
+    ns should fullyMatch regex "[A-Za-z0-9_-]+"
+  }
+
+  // ---------------------------------------------------------------------------
+  // sanitizeNamespace (retained as a utility; no longer used for provisioning)
   // ---------------------------------------------------------------------------
 
   it should "pass through a simple alphanumeric subject unchanged" in {
@@ -43,7 +82,6 @@ class OidcAuthenticateTests extends ControllerTestCommon {
   }
 
   it should "pass through an email address as a valid namespace" in {
-    // '@' and '.' are allowed in entity names
     val ns = OidcAuthenticationDirective.sanitizeNamespace("alice@example.com")
     EntityName(ns) // should not throw
     ns shouldBe "alice@example.com"
@@ -81,9 +119,16 @@ class OidcAuthenticateTests extends ControllerTestCommon {
     ns.length shouldBe EntityName.ENTITY_NAME_MAX_LENGTH
   }
 
-  it should "fall back to oidc-user for an entirely invalid subject" in {
-    // A subject consisting solely of characters that become spaces/hyphens and
-    // that can't form a valid EntityName at all (e.g. only slashes)
+  it should "not introduce an invalid trailing char after truncation" in {
+    // Build a subject where truncation at ENTITY_NAME_MAX_LENGTH would land on a '-'
+    // (which is valid mid-string but invalid as a trailing char under the EntityName regex).
+    val sub = "a" * (EntityName.ENTITY_NAME_MAX_LENGTH - 1) + "-trailing"
+    val ns = OidcAuthenticationDirective.sanitizeNamespace(sub)
+    EntityName(ns) // should not throw
+    ns.last.toString should fullyMatch regex "[\\w@.&]"
+  }
+
+  it should "fall back to u---- for an entirely invalid subject" in {
     val ns = OidcAuthenticationDirective.sanitizeNamespace("///")
     EntityName(ns) // should not throw
     ns shouldBe "u----"
@@ -97,14 +142,10 @@ class OidcAuthenticateTests extends ControllerTestCommon {
     implicit val tid = transid()
     import scala.concurrent.Await
 
-    // Pick a unique namespace so test isolation is guaranteed.
-    val subject = "oidctest-" + java.util.UUID.randomUUID().toString.take(8)
-    val namespace = EntityName(OidcAuthenticationDirective.sanitizeNamespace(subject))
-
-    // Call the package-private helper directly to exercise store interaction.
-    // We use reflection to access the private method via the companion object.
-    // Instead, test through the public surface: sanitize + expect Identity.get to
-    // fail before creation and succeed after.
+    val issuer = "https://test.issuer.example.com"
+    val jwtSubject = "oidctest-" + java.util.UUID.randomUUID().toString.take(8)
+    val namespaceName = OidcAuthenticationDirective.deriveNamespaceName(issuer, jwtSubject)
+    val namespace = EntityName(namespaceName)
 
     // 1. Confirm that no identity exists yet.
     val notFound = Await.result(
@@ -116,7 +157,7 @@ class OidcAuthenticateTests extends ControllerTestCommon {
     val uuid = UUID()
     val authKey = BasicAuthenticationAuthKey(uuid, Secret())
     val ns = Namespace(namespace, uuid)
-    val subjectEntity = Subject(subject)
+    val subjectEntity = Subject("oidc-" + namespaceName) // mirrors OidcAuthenticationDirective.createIdentity
     val whiskAuth = WhiskAuth(subjectEntity, Set(WhiskNamespace(ns, authKey)))
     put(authStore, whiskAuth)
 

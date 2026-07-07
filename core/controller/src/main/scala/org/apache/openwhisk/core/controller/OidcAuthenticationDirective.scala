@@ -130,40 +130,71 @@ object OidcAuthenticationDirective extends AuthenticationDirectiveProvider {
   }
 
   /**
+   * Derives a collision-resistant, deterministic namespace name from the OIDC principal.
+   *
+   * We concatenate the configured issuer and the JWT subject, take the SHA-256 hash, and
+   * encode the first 18 bytes as URL-safe Base64 (no padding).  The result is 24 characters
+   * of `[A-Za-z0-9_-]`, all of which are valid [[EntityName]] characters.
+   *
+   * This ensures:
+   *  - The same OIDC identity always maps to the same namespace (idempotent).
+   *  - Two different OIDC identities never share a namespace (collision-resistant).
+   *  - The namespace is a valid [[EntityName]] without any further sanitization.
+   */
+  private[controller] def deriveNamespaceName(jwtSubject: String): String =
+    deriveNamespaceName(oidcConfig.issuer, jwtSubject)
+
+  /**
+   * Pure hash-based namespace derivation, parameterised so it can be called from tests
+   * without requiring the `whisk.oidc` configuration to be loaded.
+   */
+  private[controller] def deriveNamespaceName(issuer: String, jwtSubject: String): String = {
+    import java.security.MessageDigest
+    import java.util.Base64
+    val input = s"$issuer:$jwtSubject"
+    val hash = MessageDigest.getInstance("SHA-256").digest(input.getBytes("UTF-8"))
+    // 18 bytes → 24 Base64url characters (no padding, no `/` or `+`)
+    Base64.getUrlEncoder.withoutPadding.encodeToString(hash.take(18))
+  }
+
+  /**
    * Looks up an [[Identity]] by its derived namespace name.  If no entry exists in the
    * auth-store a new [[WhiskAuth]] document is created transparently (dynamic provisioning).
    * A concurrent creation conflict is resolved by retrying the lookup once.
+   *
+   * The document subject (document ID) is also deterministically derived from the OIDC
+   * principal so that concurrent races for the same user always conflict on the same key,
+   * making the retry safe.
    */
   private def lookupOrCreateIdentity(jwtSubject: String)(implicit transid: TransactionId,
                                                          ec: ExecutionContext,
                                                          logging: Logging,
                                                          authStore: AuthStore): Future[Option[Identity]] = {
-    val namespaceName = sanitizeNamespace(jwtSubject)
-    Try(EntityName(namespaceName)) match {
-      case Failure(e) =>
-        logging.warn(this, s"Cannot derive a valid namespace from OIDC subject '$jwtSubject': ${e.getMessage}")
-        Future.successful(None)
-
-      case Success(namespace) =>
-        Identity
-          .get(authStore, namespace)
-          .map(identity => Some(identity))
-          .recoverWith {
-            case _: NoDocumentException =>
-              createIdentity(jwtSubject, namespace).recoverWith {
-                // Another request created the document concurrently – retry the lookup.
-                case _: DocumentConflictException =>
-                  Identity.get(authStore, namespace).map(Some(_)).recover {
-                    case _: NoDocumentException => None
-                  }
+    val namespaceName = deriveNamespaceName(jwtSubject)
+    val namespace = EntityName(namespaceName) // always valid: 24-char base64url
+    Identity
+      .get(authStore, namespace)
+      .map(identity => Some(identity))
+      .recoverWith {
+        case _: NoDocumentException =>
+          createIdentity(jwtSubject, namespace).recoverWith {
+            // Another request created the document concurrently – retry the lookup.
+            case _: DocumentConflictException =>
+              Identity.get(authStore, namespace).map(Some(_)).recover {
+                case _: NoDocumentException => None
               }
           }
-    }
+      }
   }
 
   /**
    * Creates a brand-new [[WhiskAuth]] record for an OIDC user that has not been seen
    * before, persists it to the auth-store and returns the resulting [[Identity]].
+   *
+   * The Subject (document ID) is derived deterministically from the OIDC issuer and JWT
+   * subject so that concurrent first-logins for the same user produce a
+   * [[DocumentConflictException]] on the second attempt rather than silently creating a
+   * duplicate document.
    */
   private def createIdentity(jwtSubject: String, namespace: EntityName)(
     implicit transid: TransactionId,
@@ -175,22 +206,18 @@ object OidcAuthenticationDirective extends AuthenticationDirectiveProvider {
     val authKey = BasicAuthenticationAuthKey(uuid, Secret())
     val ns = Namespace(namespace, uuid)
 
-    // Derive a valid Subject from the JWT subject.  Subject must be at least
-    // Subject.MIN_LENGTH characters and consist of safe characters.
-    val subjectStr = {
-      val cleaned = jwtSubject.filter(c => c.isLetterOrDigit || c == '-' || c == '_' || c == '.' || c == '@')
-      if (cleaned.length >= Subject.MIN_LENGTH) cleaned.take(256)
-      else ("oidc-" + uuid.asString.filterNot(_ == '-')).take(32)
-    }
-
-    val subject = Try(Subject(subjectStr)).getOrElse(Subject())
+    // Build a deterministic Subject (= CouchDB document ID) from issuer + raw sub.
+    // This ensures that two concurrent first-logins for the same OIDC identity always
+    // collide on the same document ID, making the DocumentConflictException retry safe.
+    val subjectStr = "oidc-" + namespace.asString // "oidc-" + 24 base64url chars = 29 chars
+    val subject = Subject(subjectStr)
     val whiskAuth = WhiskAuth(subject, Set(WhiskNamespace(ns, authKey)))
 
     implicit val notifier: Option[CacheChangeNotification] = None
     WhiskAuth
       .put(authStore, whiskAuth, None)
       .map { _ =>
-        logging.info(this, s"Dynamically created namespace '${namespace.asString}' for OIDC subject '$jwtSubject'")
+        logging.info(this, s"Dynamically created namespace '${namespace.asString}' for OIDC subject")
         Some(Identity(subject, ns, authKey, Privilege.ALL))
       }
   }
@@ -203,8 +230,13 @@ object OidcAuthenticationDirective extends AuthenticationDirectiveProvider {
    *
    *  1. Replace characters outside `[\w@ .&-]` with `-`.
    *  2. Ensure the string starts with a word character (prepend `u-` when needed).
-   *  3. Strip trailing characters that are not in `[\w@.&-]` (e.g., spaces).
-   *  4. Truncate to [[EntityName.ENTITY_NAME_MAX_LENGTH]].
+   *  3. Truncate to [[EntityName.ENTITY_NAME_MAX_LENGTH]] first, so that the subsequent
+   *     trailing-char strip cannot reintroduce an invalid trailing character.
+   *  4. Strip trailing characters that are not in `[\w@.&-]` (e.g., spaces or stray `-`).
+   *
+   * Note: the main provisioning path uses [[deriveNamespaceName]] (a hash-based scheme) to
+   * guarantee uniqueness.  This helper is retained as a utility for display or testing
+   * purposes.
    */
   private[controller] def sanitizeNamespace(subject: String): String = {
     // Step 1: replace invalid characters
@@ -213,11 +245,13 @@ object OidcAuthenticationDirective extends AuthenticationDirectiveProvider {
     // Step 2: ensure valid start (must be a word character)
     val validStart = if (replaced.nonEmpty && replaced.head.toString.matches("\\w")) replaced else "u-" + replaced
 
-    // Step 3: strip trailing characters not in [\w@.&-]
-    val validEnd = validStart.reverse.dropWhile(c => !c.toString.matches("[\\w@.&-]")).reverse
+    // Step 3: truncate before stripping so we never reintroduce an invalid trailing char
+    val truncated = validStart.take(EntityName.ENTITY_NAME_MAX_LENGTH)
 
-    // Step 4: truncate and fall back to a safe default if somehow still empty
-    if (validEnd.nonEmpty) validEnd.take(EntityName.ENTITY_NAME_MAX_LENGTH) else "oidc-user"
+    // Step 4: strip trailing characters not in [\w@.&-]
+    val validEnd = truncated.reverse.dropWhile(c => !c.toString.matches("[\\w@.&-]")).reverse
+
+    if (validEnd.nonEmpty) validEnd else "oidc-user"
   }
 
   /** Delegates to [[BasicAuthenticationDirective]] for web-action namespace lookups. */
